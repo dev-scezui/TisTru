@@ -30,6 +30,9 @@ ENV NEXT_PUBLIC_API_URL=
 # Produces .next/standalone + .next/static (requires output:'standalone' in next.config.js)
 RUN npm run build
 
+RUN test -d .next/standalone || \
+    (echo "ERROR: .next/standalone not found. Add output:'standalone' to next.config.js" && exit 1)
+
 # ─────────────────────────────────────────────
 # Stage 2: Python runtime + Ollama + FastAPI
 # ─────────────────────────────────────────────
