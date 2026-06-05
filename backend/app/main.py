@@ -2,10 +2,10 @@ import os
 import secrets
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from httpx import HTTPError
 from starlette.datastructures import UploadFile
 
@@ -18,6 +18,7 @@ from app.services.scoring import score_report
 
 # Optional Firebase Firestore
 _firestore_db: Any | None = None
+
 
 def _get_firestore_db() -> Any | None:
     global _firestore_db
@@ -44,6 +45,7 @@ def _get_firestore_db() -> Any | None:
         traceback.print_exc()
         return None
 
+
 app = FastAPI(title=settings.app_name)
 
 app.add_middleware(
@@ -56,6 +58,9 @@ app.add_middleware(
 
 # In-memory fallback store for shareable reports
 reports_db: dict[str, FactCheckReport] = {}
+
+# Internal Next.js server address (standalone, started in start.sh)
+NEXT_JS_URL = "http://localhost:3000"
 
 
 def _save_report(report_id: str, report: FactCheckReport) -> None:
@@ -181,19 +186,31 @@ async def get_report(report_id: str) -> FactCheckReport:
     return report
 
 
-# Serve the bundled frontend (only when the built dist exists, e.g., in Docker)
-_frontend_dist = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
-)
-_frontend_next = os.path.join(_frontend_dist, "_next")
-if os.path.isdir(_frontend_dist) and os.path.isdir(_frontend_next):
-    app.mount("/_next", StaticFiles(directory=_frontend_next), name="_next")
+# ── Reverse proxy: forward all non-API requests to Next.js on port 3000 ──────
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def proxy_to_nextjs(request: Request, path: str) -> StreamingResponse:
+    # Let FastAPI handle /api/* and /health natively — don't proxy them
+    if path.startswith("api/") or path == "health":
+        raise HTTPException(status_code=404)
 
-    @app.get("/{path:path}")
-    async def serve_spa(path: str) -> FileResponse:
-        if path.startswith("api/"):
-            raise HTTPException(status_code=404)
-        file_path = os.path.join(_frontend_dist, path)
-        if path and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(_frontend_dist, "index.html"))
+    url = f"{NEXT_JS_URL}/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method=request.method,
+                url=url,
+                headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
+                content=await request.body(),
+                follow_redirects=True,
+            )
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Frontend server unavailable")
+
+    return StreamingResponse(
+        content=response.aiter_bytes(),
+        status_code=response.status_code,
+        headers=dict(response.headers),
+    )
