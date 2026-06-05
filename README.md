@@ -1,6 +1,6 @@
 # TisTru
 
-TisTru is an AI-assisted fact-checking website. It accepts a public URL, extracts the artifact context, summarizes the claims, searches independent sources, scores the evidence, and generates a verdict report.
+TisTru is an AI-assisted fact-checking website. It accepts a public URL and optionally an uploaded image, extracts the artifact context, summarizes the claims, searches independent sources, scores the evidence, and generates a verdict report.
 
 ## Stack
 
@@ -10,7 +10,7 @@ TisTru is an AI-assisted fact-checking website. It accepts a public URL, extract
 ## Current pipeline
 
 1. Fetch the submitted URL.
-2. Extract title, caption-like metadata, description, readable text, images, and videos.
+2. Extract title, caption-like metadata, description, readable text, images, videos, and uploaded image key details.
 3. Summarize the context and extract checkable claims.
 4. Search for evidence with Tavily when `TAVILY_API_KEY` is set.
 5. Generate a score card and final verdict.

@@ -87,7 +87,10 @@ async def _search_tavily(query: str, claims: list[str]) -> list[EvidenceItem]:
             snippet=item.get("content") or "",
             source=urlparse(item.get("url") or "").netloc,
             stance=_classify_stance(claims, item.get("content") or ""),
-            credibility=_credibility(item.get("url") or ""),
+            credibility=_source_trust(
+                item.get("url") or "",
+                item.get("score"),
+            ),
         )
         for item in results
         if item.get("url")
@@ -109,11 +112,61 @@ def _demo_evidence(query: str) -> list[EvidenceItem]:
     ]
 
 
-def _credibility(url: str) -> float:
+MEDIUM_TRUST_HINTS = (
+    "stackoverflow.com",
+    "stackexchange.com",
+    "github.com",
+    "developer.mozilla.org",
+    "docs.",
+    "microsoft.com",
+    "wikipedia.org",
+    "wikimedia.org",
+    "arxiv.org",
+    "nih.gov",
+    "ncbi.nlm.nih.gov",
+)
+
+LOW_TRUST_HINTS = (
+    "reddit.com",
+    "quora.com",
+    "medium.com",
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "tiktok.com",
+    "pinterest.com",
+)
+
+
+def _domain_trust(url: str) -> float:
     host = urlparse(url).netloc.lower()
     if any(hint in host for hint in TRUSTED_HINTS):
         return 0.92
-    return 0.58
+    if host.endswith(".gov") or host.endswith(".edu"):
+        return 0.9
+    if any(hint in host for hint in MEDIUM_TRUST_HINTS):
+        return 0.74
+    if any(hint in host for hint in LOW_TRUST_HINTS):
+        return 0.46
+    return 0.52
+
+
+def _source_trust(url: str, relevance_score: float | int | None) -> float:
+    domain = _domain_trust(url)
+    if relevance_score is None:
+        return domain
+
+    try:
+        relevance = float(relevance_score)
+    except (TypeError, ValueError):
+        return domain
+
+    if relevance > 1:
+        relevance = relevance / 100
+
+    relevance = max(0.0, min(1.0, relevance))
+    blended = (domain * 0.45) + (relevance * 0.55)
+    return round(max(0.35, min(0.95, blended)), 2)
 
 
 def _classify_stance(claims: list[str], snippet: str) -> str:

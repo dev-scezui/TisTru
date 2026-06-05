@@ -2,15 +2,16 @@ import os
 import secrets
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from httpx import HTTPError
+from starlette.datastructures import UploadFile
 
 from app.config import settings
-from app.models import FactCheckReport, FactCheckRequest, FactCheckResponse
-from app.services.ai import _ai_available, judge_report, summarize_context
+from app.models import ArtifactContext, FactCheckReport, FactCheckRequest, FactCheckResponse
+from app.services.ai import _ai_available, extract_image_key_info, judge_report, summarize_context
 from app.services.evidence import gather_evidence
 from app.services.extractor import extract_artifact_context
 from app.services.scoring import score_report
@@ -109,11 +110,45 @@ async def health() -> dict[str, str]:
     }
 
 
+async def _parse_fact_check_submission(request: Request) -> tuple[str | None, bytes | None, str | None, str | None]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        url_value = form.get("url")
+        image_file = form.get("image")
+        image_bytes = None
+        image_name = None
+        image_content_type = None
+        if isinstance(image_file, UploadFile):
+            image_name = image_file.filename
+            image_content_type = image_file.content_type
+            image_bytes = await image_file.read()
+        return (str(url_value) if url_value else None, image_bytes, image_name, image_content_type)
+
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Invalid request payload")
+    request_model = FactCheckRequest(**payload)
+    return (str(request_model.url) if request_model.url else None, None, None, None)
+
+
 @app.post("/api/fact-check", response_model=FactCheckResponse)
-async def fact_check(request: FactCheckRequest) -> FactCheckResponse:
-    url = str(request.url)
+async def fact_check(request: Request) -> FactCheckResponse:
+    url, image_bytes, image_name, image_content_type = await _parse_fact_check_submission(request)
+    if not url and not image_bytes:
+        raise HTTPException(status_code=422, detail="Provide either a URL or an image")
     try:
-        context = await extract_artifact_context(url)
+        image_key_info = await extract_image_key_info(image_bytes, image_content_type, image_name)
+        if url:
+            context = await extract_artifact_context(url)
+            context = context.model_copy(update={"image_key_info": image_key_info})
+        else:
+            context = ArtifactContext(
+                source_url=image_name or "Uploaded image",
+                title=image_name,
+                description="Image-only investigation",
+                image_key_info=image_key_info,
+            )
         summary, claims = await summarize_context(context)
         evidence = await gather_evidence(summary, claims)
         scores, verdict = score_report(evidence)
@@ -126,6 +161,7 @@ async def fact_check(request: FactCheckRequest) -> FactCheckResponse:
     report = FactCheckReport(
         url=url,
         context_summary=summary,
+        image_key_info=context.image_key_info,
         key_claims=claims,
         evidence=evidence,
         scores=scores,
@@ -149,8 +185,9 @@ async def get_report(report_id: str) -> FactCheckReport:
 _frontend_dist = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
 )
-if os.path.isdir(_frontend_dist):
-    app.mount("/_next", StaticFiles(directory=os.path.join(_frontend_dist, "_next")), name="_next")
+_frontend_next = os.path.join(_frontend_dist, "_next")
+if os.path.isdir(_frontend_dist) and os.path.isdir(_frontend_next):
+    app.mount("/_next", StaticFiles(directory=_frontend_next), name="_next")
 
     @app.get("/{path:path}")
     async def serve_spa(path: str) -> FileResponse:

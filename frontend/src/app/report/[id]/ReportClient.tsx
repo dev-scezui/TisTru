@@ -2,7 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -14,7 +14,9 @@ import {
   Gauge,
   SearchCheck,
   ShieldQuestion,
+  XCircle,
 } from "lucide-react";
+import { RichText } from "@/components/RichText";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -35,8 +37,9 @@ type EvidenceItem = {
 };
 
 type Report = {
-  url: string;
+  url: string | null;
   context_summary: string;
+  image_key_info: string | null;
   key_claims: string[];
   evidence: EvidenceItem[];
   scores: {
@@ -49,14 +52,20 @@ type Report = {
   verdict_reason: string;
 };
 
-export default function ReportPage() {
-  const params = useParams();
-  const id = params.id as string;
+export default function ReportClient() {
+  const searchParams = useSearchParams();
+  const id = searchParams.get("id");
   const [report, setReport] = React.useState<Report | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState("");
 
   React.useEffect(() => {
+    if (!id) {
+      setError("Missing report id");
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
     async function load() {
       try {
@@ -90,7 +99,7 @@ export default function ReportPage() {
           </div>
           <div className="report-header-url">
             <Link2 size={16} />
-            <span>{report?.url || "Investigated URL"}</span>
+            <span>{report?.url || "Uploaded image"}</span>
           </div>
           <Link className="report-header-action" href="/">
             New investigation
@@ -116,11 +125,13 @@ function EmptyState({ isLoading }: { isLoading: boolean }) {
       <div className="radar">
         <Globe2 size={54} />
       </div>
-      <h2>{isLoading ? "Investigation running" : "Ready for a source URL"}</h2>
+      <h2>
+        {isLoading ? "Investigation running" : "Ready for a source or image"}
+      </h2>
       <p>
         {isLoading
           ? "The backend is extracting context, searching evidence, and composing a report."
-          : "Use a public URL with accessible metadata or article text for best results."}
+          : "Switch between URL and image mode from the homepage to start a new check."}
       </p>
     </section>
   );
@@ -128,6 +139,7 @@ function EmptyState({ isLoading }: { isLoading: boolean }) {
 
 function ReportView({ report }: { report: Report }) {
   const verdict = verdictCopy(report.verdict);
+  const legitimacy = Math.max(0, Math.min(100, report.scores.legitimacy));
   const [copied, setCopied] = React.useState(false);
 
   function copyLink() {
@@ -141,16 +153,26 @@ function ReportView({ report }: { report: Report }) {
   return (
     <section className="report">
       <div className={`verdict ${verdict.tone}`}>
-        <div>
+        <div className="verdict-main">
           <p className="eyebrow">Final verdict</p>
-          <h2>{verdict.label}</h2>
-          <p>{report.verdict_reason}</p>
+          <div className="verdict-heading">
+            <h2>{verdict.label}</h2>
+            <div className="verdict-score" aria-label={`Legitimacy score ${legitimacy} percent`}>
+              <strong>{legitimacy}%</strong>
+              <span>legitimacy score</span>
+            </div>
+          </div>
+          <RichText text={report.verdict_reason} className="verdict-reason" />
         </div>
-        {report.verdict.includes("legitimate") ? (
-          <CheckCircle2 size={54} />
-        ) : (
-          <ShieldQuestion size={54} />
-        )}
+        <div className="verdict-icon" aria-hidden>
+          {report.verdict === "fake" || report.verdict === "likely_fake" ? (
+            <XCircle size={54} />
+          ) : report.verdict.includes("legitimate") ? (
+            <CheckCircle2 size={54} />
+          ) : (
+            <ShieldQuestion size={54} />
+          )}
+        </div>
       </div>
 
       <div className="share-bar">
@@ -184,7 +206,15 @@ function ReportView({ report }: { report: Report }) {
           <p>{report.context_summary}</p>
         </article>
 
-        <article className="panel">
+        {report.image_key_info && (
+          <article className="panel">
+            <p className="eyebrow">Image key info</p>
+            <h3>What was extracted from the upload</h3>
+            <p>{report.image_key_info}</p>
+          </article>
+        )}
+
+        <article className={`panel ${report.image_key_info ? "" : "span-2"}`}>
           <p className="eyebrow">Extracted claims</p>
           <h3>Check targets</h3>
           <ul className="claims">
@@ -196,7 +226,7 @@ function ReportView({ report }: { report: Report }) {
           </ul>
         </article>
 
-        <article className="panel evidence-panel">
+        <article className="panel evidence-panel span-2">
           <p className="eyebrow">Evidence trail</p>
           <h3>Sources inspected</h3>
           <EvidenceAccordion items={report.evidence} />
@@ -266,8 +296,11 @@ function EvidenceAccordion({ items }: { items: EvidenceItem[] }) {
                 >
                   {item.title}
                 </a>
-                <span className="evidence-cred">
-                  {Math.round(item.credibility * 100)}% credibility
+                <span
+                  className="evidence-cred"
+                  title="Combines domain reputation with search relevance"
+                >
+                  {Math.round(item.credibility * 100)}% source trust
                 </span>
               </div>
               <ChevronDown size={18} className="evidence-chevron" />

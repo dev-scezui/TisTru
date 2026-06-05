@@ -6,3 +6,4 @@ openai==1.35.7
 pydantic-settings==2.3.4
 python-dotenv==1.0.1
 firebase-admin==6.5.0
+python-multipart==0.0.9

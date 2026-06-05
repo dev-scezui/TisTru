@@ -11,7 +11,7 @@ class Verdict(str, Enum):
 
 
 class FactCheckRequest(BaseModel):
-    url: HttpUrl
+    url: HttpUrl | None = None
 
 
 class ArtifactContext(BaseModel):
@@ -20,6 +20,7 @@ class ArtifactContext(BaseModel):
     caption: str | None = None
     description: str | None = None
     text: str | None = None
+    image_key_info: str | None = None
     images: list[str] = Field(default_factory=list)
     videos: list[str] = Field(default_factory=list)
 
@@ -41,8 +42,9 @@ class ScoreCard(BaseModel):
 
 
 class FactCheckReport(BaseModel):
-    url: str
+    url: str | None = None
     context_summary: str
+    image_key_info: str | None = None
     key_claims: list[str]
     evidence: list[EvidenceItem]
     scores: ScoreCard
