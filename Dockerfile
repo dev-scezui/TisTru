@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         nodejs \
         npm \
+        zstd \
     && curl -fsSL https://ollama.com/install.sh | sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
