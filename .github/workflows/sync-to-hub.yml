@@ -17,9 +17,24 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Hugging Face Space
-        uses: huggingface/huggingface-hub-action@main
-        with:
-          hf_token: ${{ secrets.HF_TOKEN }}
-          repo_id: dev-scezui/tistru
-          repo_type: space
+      - name: Push to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add space https://.:$HF_TOKEN@huggingface.co/spaces/dev-scezui/tistru
+
+          # Retry up to 5 times with exponential backoff
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i..."
+            git push --force space main && break
+            if [ $i -lt 5 ]; then
+              echo "Failed. Waiting $((i * 15)) seconds before retry..."
+              sleep $((i * 15))
+            fi
+          done
+
+          # Check if push ultimately succeeded
+          if ! git ls-remote space main &>/dev/null; then
+            echo "All retry attempts failed."
+            exit 1
+          fi
