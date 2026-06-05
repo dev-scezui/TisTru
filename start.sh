@@ -74,7 +74,7 @@ done
 # Static/frontend requests are reverse-proxied to Next.js on port 3000
 # via the proxy logic in backend/app/main.py (or handled by a middleware).
 echo "[4/4] Starting FastAPI backend on port $PORT..."
-exec uvicorn backend.app.main:app \
+exec env PYTHONPATH=/app/backend uvicorn backend.app.main:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --workers 1 \
