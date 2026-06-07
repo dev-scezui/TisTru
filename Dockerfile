@@ -88,7 +88,7 @@ ENV PATH=/home/user/.local/bin:/usr/local/bin:$PATH
 ENV OLLAMA_HOST=0.0.0.0:11434
 ENV OLLAMA_MODELS=/home/user/.ollama/models
 ENV OLLAMA_BASE_URL=http://localhost:11434/v1
-ENV OLLAMA_MODEL=llama3.1
+ENV OLLAMA_MODEL=llama3.2:3b
 
 # App config
 ENV USE_LOCAL_LLM=true
