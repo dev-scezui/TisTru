@@ -189,7 +189,6 @@ async def get_report(report_id: str) -> FactCheckReport:
 # ── Reverse proxy: forward all non-API requests to Next.js on port 3000 ──────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
 async def proxy_to_nextjs(request: Request, path: str) -> StreamingResponse:
-    # Let FastAPI handle /api/* and /health natively — don't proxy them
     if path.startswith("api/") or path == "health":
         raise HTTPException(status_code=404)
 
@@ -209,8 +208,19 @@ async def proxy_to_nextjs(request: Request, path: str) -> StreamingResponse:
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Frontend server unavailable")
 
+    # Strip headers that conflict with proxied streaming responses
+    excluded_headers = {
+        "content-encoding",   # httpx already decoded — browser must not decode again
+        "content-length",     # length is now wrong after decoding
+        "transfer-encoding",  # may conflict with StreamingResponse chunking
+    }
+    headers = {
+        k: v for k, v in response.headers.items()
+        if k.lower() not in excluded_headers
+    }
+
     return StreamingResponse(
         content=response.aiter_bytes(),
         status_code=response.status_code,
-        headers=dict(response.headers),
+        headers=headers,
     )
