@@ -63,6 +63,33 @@ export default function HomePage() {
     return () => timers.forEach(clearTimeout);
   }, [isLoading]);
 
+  React.useEffect(() => {
+    if (mode !== "image") return;
+
+    function onPaste(event: ClipboardEvent) {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      for (const item of items) {
+        if (!item.type.startsWith("image/")) continue;
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        const ext = blob.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+        setImageFile(
+          new File([blob], `pasted-image.${ext}`, {
+            type: blob.type || "image/png",
+          }),
+        );
+        event.preventDefault();
+        break;
+      }
+    }
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [mode]);
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
@@ -191,7 +218,6 @@ export default function HomePage() {
                           setImageFile(event.target.files?.[0] ?? null)
                         }
                         type="file"
-                        required
                       />
                       <span className="upload-icon" aria-hidden>
                         <ImageUp size={18} />
@@ -199,7 +225,7 @@ export default function HomePage() {
                       <span className="upload-text">
                         {imageFile
                           ? imageFile.name
-                          : "Choose a file — JPG, PNG, or WebP"}
+                          : "Choose a file or paste — JPG, PNG, or WebP"}
                       </span>
                     </span>
                   </label>
