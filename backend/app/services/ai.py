@@ -74,7 +74,7 @@ async def extract_image_key_info(
         return fallback
 
 
-async def summarize_context(context: ArtifactContext) -> tuple[str, list[str]]:
+async def summarize_context(context: ArtifactContext) -> tuple[str, list[str], bool]:
     if not _ai_available():
         return _heuristic_summary(context)
 
@@ -92,13 +92,34 @@ async def summarize_context(context: ArtifactContext) -> tuple[str, list[str]]:
     response = await client.chat.completions.create(
         model=_ai_model(),
         messages=[
-            {"role": "system", "content": "You are a precise summarizer. Extract the post context and factual claims. Respond with ONLY a valid JSON object containing 'summary' (string) and 'key_claims' (array of strings). Do not include markdown fences or extra text."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise summarizer for a fact-checking system. "
+                    "Extract the post context and factual claims. "
+                    "Set verifiable to false when there are no checkable factual claims, "
+                    "or when claims are only vague/unfalsifiable (e.g. entertainment with no assertion of fact). "
+                    "Set verifiable to true only when at least one specific, falsifiable claim exists. "
+                    "Respond with ONLY a valid JSON object containing "
+                    "'summary' (string), 'key_claims' (array of strings), and 'verifiable' (boolean). "
+                    "Do not include markdown fences or extra text."
+                ),
+            },
             {"role": "user", "content": json.dumps(prompt)},
         ],
     )
     raw = response.choices[0].message.content or "{}"
     payload = _extract_json(raw)
-    return payload.get("summary", "No summary generated."), payload.get("key_claims", [])
+    summary = payload.get("summary", "No summary generated.")
+    claims = payload.get("key_claims", [])
+    if not isinstance(claims, list):
+        claims = []
+    claims = [str(c) for c in claims if c]
+    if "verifiable" in payload:
+        verifiable = bool(payload["verifiable"])
+    else:
+        verifiable = bool(claims)
+    return summary, claims, verifiable
 
 
 def _extract_json(text: str) -> dict:
@@ -161,7 +182,7 @@ async def judge_report(summary: str, claims: list[str], evidence: list[EvidenceI
     return _plain_text_reason(raw)
 
 
-def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str]]:
+def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str], bool]:
     parts = [context.title, context.caption, context.description]
     if context.image_key_info:
         parts.append(f"Image notes: {context.image_key_info}")
@@ -176,7 +197,8 @@ def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str]]:
         cleaned = sentence.strip()
         if len(cleaned.split()) >= 5:
             claims.append(cleaned)
-    return summary, claims[:5]
+    claims = claims[:5]
+    return summary, claims, bool(claims)
 
 
 def _to_data_url(image_bytes: bytes, content_type: str | None) -> str:

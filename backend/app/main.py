@@ -10,11 +10,22 @@ from httpx import HTTPError
 from starlette.datastructures import UploadFile
 
 from app.config import settings
-from app.models import ArtifactContext, FactCheckReport, FactCheckRequest, FactCheckResponse
+from app.models import (
+    ArtifactContext,
+    FactCheckReport,
+    FactCheckRequest,
+    FactCheckResponse,
+    ScoreCard,
+    Verdict,
+)
 from app.services.ai import _ai_available, extract_image_key_info, judge_report, summarize_context
 from app.services.evidence import gather_evidence
 from app.services.extractor import extract_artifact_context
 from app.services.scoring import score_report
+
+_CANNOT_DETERMINE_REASON = (
+    "This content does not contain a specific, verifiable factual claim that can be fact-checked."
+)
 
 # Optional Firebase Firestore
 _firestore_db: Any | None = None
@@ -60,7 +71,7 @@ app.add_middleware(
 reports_db: dict[str, FactCheckReport] = {}
 
 # Internal Next.js server address (standalone, started in start.sh)
-NEXT_JS_URL = "http://localhost:3000"
+NEXT_JS_URL = settings.frontend_origin
 
 
 def _save_report(report_id: str, report: FactCheckReport) -> None:
@@ -154,10 +165,21 @@ async def fact_check(request: Request) -> FactCheckResponse:
                 description="Image-only investigation",
                 image_key_info=image_key_info,
             )
-        summary, claims = await summarize_context(context)
-        evidence = await gather_evidence(summary, claims)
-        scores, verdict = score_report(evidence)
-        reason = await judge_report(summary, claims, evidence, verdict)
+        summary, claims, verifiable = await summarize_context(context)
+        if not verifiable:
+            evidence = []
+            scores = ScoreCard(
+                legitimacy=0,
+                evidence_strength=0,
+                source_credibility=0,
+                contradiction_risk=0,
+            )
+            verdict = Verdict.cannot_be_determined
+            reason = _CANNOT_DETERMINE_REASON
+        else:
+            evidence = await gather_evidence(summary, claims)
+            scores, verdict = score_report(evidence)
+            reason = await judge_report(summary, claims, evidence, verdict)
     except HTTPError as exc:
         raise HTTPException(status_code=422, detail=f"Unable to fetch or inspect the URL: {exc}") from exc
     except Exception as exc:

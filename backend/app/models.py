@@ -8,6 +8,7 @@ class Verdict(str, Enum):
     uncertain = "uncertain"
     likely_fake = "likely_fake"
     fake = "fake"
+    cannot_be_determined = "cannot_be_determined"
 
 
 class FactCheckRequest(BaseModel):
