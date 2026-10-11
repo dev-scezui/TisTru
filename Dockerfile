@@ -24,8 +24,20 @@ RUN npm ci
 # Copy source and build
 COPY frontend ./
 
-# NEXT_PUBLIC_API_URL is empty so the frontend calls the same origin (port 7860)
-ENV NEXT_PUBLIC_API_URL=
+# NEXT_PUBLIC_* is inlined at build time. HF Spaces passes matching Space
+# secrets/variables as build-args; declare ARG+ENV so Next can see them.
+ARG NEXT_PUBLIC_FIREBASE_API_KEY
+ARG NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+ARG NEXT_PUBLIC_FIREBASE_PROJECT_ID
+ARG NEXT_PUBLIC_FIREBASE_APP_ID
+ARG NEXT_PUBLIC_ADMIN_PATH_SECRET
+# Empty API URL → frontend calls the same origin (port 7860)
+ENV NEXT_PUBLIC_API_URL= \
+    NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
+    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN \
+    NEXT_PUBLIC_FIREBASE_PROJECT_ID=$NEXT_PUBLIC_FIREBASE_PROJECT_ID \
+    NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID \
+    NEXT_PUBLIC_ADMIN_PATH_SECRET=$NEXT_PUBLIC_ADMIN_PATH_SECRET
 
 # Produces .next/standalone + .next/static (requires output:'standalone' in next.config.js)
 RUN npm run build
