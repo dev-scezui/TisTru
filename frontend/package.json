@@ -1,13 +1,15 @@
 {
   "name": "tistru-frontend",
   "scripts": {
-    "dev": "next dev",
+    "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\"",
+    "dev": "npm run clean && next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
-    "lucide-react": "latest",
+    "firebase": "^13.0.0",
+    "lucide-react": "^0.577.0",
     "next": "latest",
     "react": "latest",
     "react-dom": "latest"

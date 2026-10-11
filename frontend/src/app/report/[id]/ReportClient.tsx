@@ -25,7 +25,8 @@ type Verdict =
   | "likely_legitimate"
   | "uncertain"
   | "likely_fake"
-  | "fake";
+  | "fake"
+  | "cannot_be_determined";
 
 type EvidenceItem = {
   title: string;
@@ -139,6 +140,7 @@ function EmptyState({ isLoading }: { isLoading: boolean }) {
 
 function ReportView({ report }: { report: Report }) {
   const verdict = verdictCopy(report.verdict);
+  const cannotDetermine = report.verdict === "cannot_be_determined";
   const legitimacy = Math.max(0, Math.min(100, report.scores.legitimacy));
   const [copied, setCopied] = React.useState(false);
 
@@ -157,10 +159,17 @@ function ReportView({ report }: { report: Report }) {
           <p className="eyebrow">Final verdict</p>
           <div className="verdict-heading">
             <h2>{verdict.label}</h2>
-            <div className="verdict-score" aria-label={`Legitimacy score ${legitimacy} percent`}>
-              <strong>{legitimacy}%</strong>
-              <span>legitimacy score</span>
-            </div>
+            {cannotDetermine ? (
+              <div className="verdict-score" aria-label="Legitimacy score not applicable">
+                <strong>N/A</strong>
+                <span>legitimacy score</span>
+              </div>
+            ) : (
+              <div className="verdict-score" aria-label={`Legitimacy score ${legitimacy} percent`}>
+                <strong>{legitimacy}%</strong>
+                <span>legitimacy score</span>
+              </div>
+            )}
           </div>
           <RichText text={report.verdict_reason} className="verdict-reason" />
         </div>
@@ -182,22 +191,24 @@ function ReportView({ report }: { report: Report }) {
         </button>
       </div>
 
-      <div className="score-grid">
-        <Score label="Legitimacy" value={report.scores.legitimacy} />
-        <Score
-          label="Evidence strength"
-          value={report.scores.evidence_strength}
-        />
-        <Score
-          label="Source credibility"
-          value={report.scores.source_credibility}
-        />
-        <Score
-          label="Contradiction risk"
-          value={report.scores.contradiction_risk}
-          inverted
-        />
-      </div>
+      {!cannotDetermine && (
+        <div className="score-grid">
+          <Score label="Legitimacy" value={report.scores.legitimacy} />
+          <Score
+            label="Evidence strength"
+            value={report.scores.evidence_strength}
+          />
+          <Score
+            label="Source credibility"
+            value={report.scores.source_credibility}
+          />
+          <Score
+            label="Contradiction risk"
+            value={report.scores.contradiction_risk}
+            inverted
+          />
+        </div>
+      )}
 
       <div className="report-grid">
         <article className="panel span-2">
@@ -229,7 +240,15 @@ function ReportView({ report }: { report: Report }) {
         <article className="panel evidence-panel span-2">
           <p className="eyebrow">Evidence trail</p>
           <h3>Sources inspected</h3>
-          <EvidenceAccordion items={report.evidence} />
+          {report.evidence.length ? (
+            <EvidenceAccordion items={report.evidence} />
+          ) : (
+            <p>
+              {cannotDetermine
+                ? "Evidence search was skipped because the content is not fact-checkable."
+                : "No evidence sources were found."}
+            </p>
+          )}
         </article>
       </div>
     </section>
@@ -341,6 +360,7 @@ function verdictCopy(verdict: Verdict) {
     uncertain: { label: "Uncertain", tone: "unknown" },
     likely_fake: { label: "Likely fake", tone: "bad" },
     fake: { label: "Fake", tone: "bad" },
+    cannot_be_determined: { label: "Cannot be determined", tone: "unknown" },
   };
   return labels[verdict];
 }

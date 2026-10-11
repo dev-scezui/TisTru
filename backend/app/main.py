@@ -1,50 +1,48 @@
-import os
+import logging
 import secrets
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from httpx import HTTPError
+from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile
 
+from app.auth import optional_user
 from app.config import settings
-from app.models import ArtifactContext, FactCheckReport, FactCheckRequest, FactCheckResponse
+from app.firebase_app import get_firestore_db
+from app.models import (
+    ArtifactContext,
+    FactCheckReport,
+    FactCheckRequest,
+    FactCheckResponse,
+    ScoreCard,
+    Verdict,
+)
+from app.rate_limit import SlidingWindowRateLimiter
+from app.reports_store import load_report, save_report
+from app.routers.admin import router as admin_router
 from app.services.ai import _ai_available, extract_image_key_info, judge_report, summarize_context
+from app.services.analytics import record_fact_check
 from app.services.evidence import gather_evidence
 from app.services.extractor import extract_artifact_context
+from app.services.runtime_settings import get_runtime_settings, mask_secret
 from app.services.scoring import score_report
+from app.services.image_type import detect_image_mime
+from app.services.url_safety import UnsafeUrlError, assert_safe_http_url
+from app.services.usage import UsageDenied, UsageUnavailable, consume_anon_quota, consume_user_quota
 
-# Optional Firebase Firestore
-_firestore_db: Any | None = None
-
-
-def _get_firestore_db() -> Any | None:
-    global _firestore_db
-    if _firestore_db is not None:
-        return _firestore_db
-    try:
-        import json
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-        if not firebase_admin._apps:
-            cred_json = settings.firebase_service_account_json
-            cred_path = settings.firebase_credentials_path
-            if cred_json:
-                firebase_admin.initialize_app(credentials.Certificate(json.loads(cred_json)))
-            elif cred_path:
-                firebase_admin.initialize_app(credentials.Certificate(cred_path))
-            else:
-                firebase_admin.initialize_app()
-        _firestore_db = firestore.client()
-        return _firestore_db
-    except Exception as exc:
-        import traceback
-        print("[firebase] initialization failed:", exc)
-        traceback.print_exc()
-        return None
-
+_CANNOT_DETERMINE_REASON = (
+    "This content does not contain a specific, verifiable factual claim that can be fact-checked."
+)
+_PIPELINE_FAILURE_DETAIL = "Unable to complete the investigation. Please try again later."
+_fact_check_limiter = SlidingWindowRateLimiter(
+    limit=settings.fact_check_rate_limit,
+    window_seconds=settings.fact_check_rate_window_seconds,
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name)
 
@@ -56,97 +54,219 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory fallback store for shareable reports
-reports_db: dict[str, FactCheckReport] = {}
+app.include_router(admin_router)
 
 # Internal Next.js server address (standalone, started in start.sh)
-NEXT_JS_URL = "http://localhost:3000"
-
-
-def _save_report(report_id: str, report: FactCheckReport) -> None:
-    db = _get_firestore_db()
-    if db:
-        db.collection("reports").document(report_id).set(report.model_dump())
-    else:
-        reports_db[report_id] = report
-
-
-def _load_report(report_id: str) -> FactCheckReport | None:
-    db = _get_firestore_db()
-    if db:
-        doc = db.collection("reports").document(report_id).get()
-        if doc.exists:
-            return FactCheckReport(**doc.to_dict())
-        return None
-    return reports_db.get(report_id)
-
-
-def _mask(value: str | None, length: int = 6) -> str:
-    if not value:
-        return "not set"
-    if len(value) <= length * 2:
-        return "set"
-    return f"{value[:length]}...{value[-length:]}"
+NEXT_JS_URL = settings.frontend_origin
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    print("[startup] Tavily key:", _mask(settings.tavily_api_key))
-    print("[startup] AI mode:", "local" if settings.use_local_llm else "api")
-    if settings.use_local_llm:
-        print("[startup] Ollama base URL:", settings.ollama_base_url)
-        print("[startup] Ollama model:", settings.ollama_model)
+    rt = get_runtime_settings(force=True)
+    print("[startup] Tavily key:", mask_secret(rt.tavily_api_key))
+    print("[startup] AI mode:", "local" if rt.use_local_llm else "api")
+    if rt.use_local_llm:
+        print("[startup] Ollama base URL:", rt.ollama_base_url)
+        print("[startup] Ollama model:", rt.ollama_model)
     else:
-        print("[startup] OpenAI key:", _mask(settings.openai_api_key))
-        print("[startup] OpenAI base URL:", settings.openai_base_url or "not set")
-        print("[startup] OpenAI model:", settings.openai_model)
-    db = _get_firestore_db()
+        print("[startup] OpenAI key:", mask_secret(rt.openai_api_key))
+        print("[startup] OpenAI base URL:", rt.openai_base_url or "not set")
+        print("[startup] OpenAI model:", rt.openai_model)
+    db = get_firestore_db()
     print("[startup] Firebase configured:", "yes" if db else "no")
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    rt = get_runtime_settings()
     return {
         "status": "ok",
-        "tavily_configured": "yes" if settings.tavily_api_key else "no",
+        "tavily_configured": "yes" if rt.tavily_api_key else "no",
         "ai_configured": "yes" if _ai_available() else "no",
-        "ai_mode": "local" if settings.use_local_llm else "api",
-        "firebase_configured": "yes" if _get_firestore_db() else "no",
+        "ai_mode": "local" if rt.use_local_llm else "api",
+        "firebase_configured": "yes" if get_firestore_db() else "no",
     }
 
 
-async def _parse_fact_check_submission(request: Request) -> tuple[str | None, bytes | None, str | None, str | None]:
+class ClientLogBody(BaseModel):
+    event: str = Field(max_length=64)
+    code: str | None = Field(default=None, max_length=128)
+    detail: str | None = Field(default=None, max_length=300)
+    cancelled: bool = False
+
+
+@app.post("/api/client-log")
+async def client_log(body: ClientLogBody) -> dict[str, str]:
+    """Accept sanitized client auth/events for server-side logging only."""
+    level = logging.INFO if body.cancelled else logging.WARNING
+    logger.log(
+        level,
+        "client_log event=%s code=%s cancelled=%s detail=%s",
+        body.event,
+        body.code or "-",
+        body.cancelled,
+        body.detail or "-",
+    )
+    return {"status": "ok"}
+
+
+def _client_ip(request: Request) -> str:
+    """Client IP for anon quotas. Ignore XFF unless TRUST_X_FORWARDED_FOR is set.
+
+    When trust is enabled, use the rightmost XFF hop (typically appended by the
+    reverse proxy). Never trust the leftmost hop — clients can spoof it.
+    """
+    if settings.trust_x_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            hops = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if hops:
+                return hops[-1]
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _honeypot_filled(value: Any) -> bool:
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
+async def _parse_fact_check_submission(
+    request: Request,
+) -> tuple[str | None, str | None, bytes | None, str | None, str | None]:
     content_type = request.headers.get("content-type", "")
-    if content_type.startswith("multipart/form-data"):
+    if content_type.startswith("multipart/form-data") or content_type.startswith(
+        "application/x-www-form-urlencoded"
+    ):
         form = await request.form()
+        if _honeypot_filled(form.get("website")) or _honeypot_filled(form.get("company")):
+            raise HTTPException(status_code=422, detail="Invalid submission")
         url_value = form.get("url")
+        text_value = form.get("text")
         image_file = form.get("image")
         image_bytes = None
         image_name = None
         image_content_type = None
-        if isinstance(image_file, UploadFile):
+        if isinstance(image_file, UploadFile) and image_file.filename:
             image_name = image_file.filename
             image_content_type = image_file.content_type
             image_bytes = await image_file.read()
-        return (str(url_value) if url_value else None, image_bytes, image_name, image_content_type)
+        url = str(url_value).strip() if url_value else None
+        text = str(text_value).strip() if text_value else None
+        return (url or None, text or None, image_bytes, image_name, image_content_type)
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid request payload") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Invalid request payload")
+    if _honeypot_filled(payload.get("website")) or _honeypot_filled(payload.get("company")):
+        raise HTTPException(status_code=422, detail="Invalid submission")
     request_model = FactCheckRequest(**payload)
-    return (str(request_model.url) if request_model.url else None, None, None, None)
+    url = str(request_model.url) if request_model.url else None
+    text = request_model.text.strip() if request_model.text else None
+    return (url, text or None, None, None, None)
+
+
+def _validate_submission(
+    url: str | None,
+    text: str | None,
+    image_bytes: bytes | None,
+    image_content_type: str | None,
+) -> str | None:
+    """Validate inputs. Returns detected image MIME when an image is provided."""
+    provided = sum(bool(x) for x in (url, text, image_bytes))
+    if provided == 0:
+        raise HTTPException(status_code=422, detail="Provide a URL, text, or an image")
+    if provided > 1:
+        raise HTTPException(status_code=422, detail="Provide only one of URL, text, or image")
+
+    if url is not None:
+        if len(url) > settings.max_url_length:
+            raise HTTPException(status_code=422, detail="URL is too long")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(status_code=422, detail="URL must start with http:// or https://")
+        try:
+            assert_safe_http_url(url)
+        except UnsafeUrlError as exc:
+            raise HTTPException(status_code=422, detail="URL is not allowed") from exc
+
+    if text is not None:
+        if len(text) < settings.min_text_chars:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Text must be at least {settings.min_text_chars} characters",
+            )
+        if len(text) > settings.max_text_chars:
+            raise HTTPException(status_code=422, detail="Text is too long")
+
+    if image_bytes is not None:
+        if len(image_bytes) == 0:
+            raise HTTPException(status_code=422, detail="Image file is empty")
+        if len(image_bytes) > settings.max_image_bytes:
+            raise HTTPException(status_code=422, detail="Image must be 5 MB or smaller")
+        detected = detect_image_mime(image_bytes)
+        if detected is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Image must be JPG, PNG, or WebP",
+            )
+        return detected
+    return None
 
 
 @app.post("/api/fact-check", response_model=FactCheckResponse)
-async def fact_check(request: Request) -> FactCheckResponse:
-    url, image_bytes, image_name, image_content_type = await _parse_fact_check_submission(request)
-    if not url and not image_bytes:
-        raise HTTPException(status_code=422, detail="Provide either a URL or an image")
+async def fact_check(
+    request: Request,
+    user: dict[str, Any] | None = Depends(optional_user),
+) -> FactCheckResponse | JSONResponse:
+    burst_key = f"uid:{user['uid']}" if user else f"ip:{_client_ip(request)}"
+    allowed, retry_after = _fact_check_limiter.check(burst_key)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many investigations. Try again shortly."},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    try:
+        if user:
+            consume_user_quota(str(user["uid"]))
+        else:
+            consume_anon_quota(_client_ip(request))
+    except UsageDenied as exc:
+        if exc.code == "auth_required":
+            return JSONResponse(status_code=401, content={"detail": "auth_required"})
+        if exc.code == "daily_limit":
+            return JSONResponse(status_code=429, content={"detail": "daily_limit"})
+        raise HTTPException(status_code=429, detail=exc.message) from exc
+    except UsageUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Usage tracking unavailable",
+        ) from exc
+
+    url, text, image_bytes, image_name, _declared_image_type = await _parse_fact_check_submission(
+        request
+    )
+    image_content_type = _validate_submission(url, text, image_bytes, _declared_image_type)
+
     try:
         image_key_info = await extract_image_key_info(image_bytes, image_content_type, image_name)
         if url:
             context = await extract_artifact_context(url)
             context = context.model_copy(update={"image_key_info": image_key_info})
+        elif text:
+            context = ArtifactContext(
+                source_url="Pasted text",
+                title="User-submitted text",
+                description="Text-only investigation",
+                text=text,
+                image_key_info=image_key_info,
+            )
         else:
             context = ArtifactContext(
                 source_url=image_name or "Uploaded image",
@@ -154,14 +274,35 @@ async def fact_check(request: Request) -> FactCheckResponse:
                 description="Image-only investigation",
                 image_key_info=image_key_info,
             )
-        summary, claims = await summarize_context(context)
-        evidence = await gather_evidence(summary, claims)
-        scores, verdict = score_report(evidence)
-        reason = await judge_report(summary, claims, evidence, verdict)
+        summary, claims, verifiable = await summarize_context(context)
+        if not verifiable:
+            evidence = []
+            scores = ScoreCard(
+                legitimacy=0,
+                evidence_strength=0,
+                source_credibility=0,
+                contradiction_risk=0,
+            )
+            verdict = Verdict.cannot_be_determined
+            reason = _CANNOT_DETERMINE_REASON
+        else:
+            evidence = await gather_evidence(summary, claims)
+            scores, verdict = score_report(
+                evidence,
+                summary=summary,
+                image_key_info=context.image_key_info,
+            )
+            reason = await judge_report(summary, claims, evidence, verdict)
+    except UnsafeUrlError as exc:
+        record_fact_check(ok=False)
+        raise HTTPException(status_code=422, detail="URL is not allowed") from exc
     except HTTPError as exc:
-        raise HTTPException(status_code=422, detail=f"Unable to fetch or inspect the URL: {exc}") from exc
+        record_fact_check(ok=False)
+        raise HTTPException(status_code=422, detail="Unable to fetch or inspect the URL") from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Fact-check pipeline failed: {exc}") from exc
+        record_fact_check(ok=False)
+        logger.exception("Fact-check pipeline failed")
+        raise HTTPException(status_code=500, detail=_PIPELINE_FAILURE_DETAIL) from exc
 
     report = FactCheckReport(
         url=url,
@@ -174,13 +315,14 @@ async def fact_check(request: Request) -> FactCheckResponse:
         verdict_reason=reason,
     )
     report_id = secrets.token_urlsafe(8)
-    _save_report(report_id, report)
+    save_report(report_id, report)
+    record_fact_check(ok=True, verdict=verdict.value)
     return FactCheckResponse(id=report_id, **report.model_dump())
 
 
 @app.get("/api/reports/{report_id}", response_model=FactCheckReport)
 async def get_report(report_id: str) -> FactCheckReport:
-    report = _load_report(report_id)
+    report = load_report(report_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report
@@ -208,11 +350,10 @@ async def proxy_to_nextjs(request: Request, path: str) -> StreamingResponse:
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Frontend server unavailable")
 
-    # Strip headers that conflict with proxied streaming responses
     excluded_headers = {
-        "content-encoding",   # httpx already decoded — browser must not decode again
-        "content-length",     # length is now wrong after decoding
-        "transfer-encoding",  # may conflict with StreamingResponse chunking
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
     }
     headers = {
         k: v for k, v in response.headers.items()

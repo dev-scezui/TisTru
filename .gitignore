@@ -5,4 +5,11 @@ __pycache__/
 node_modules/
 dist/
 .DS_Store
+
 .next/
+
+docs/
+
+.env.local
+.audit/
+backend/tests/

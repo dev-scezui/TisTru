@@ -4,29 +4,32 @@ import re
 
 from openai import AsyncOpenAI
 
-from app.config import settings
 from app.models import ArtifactContext, EvidenceItem, Verdict
+from app.services.runtime_settings import get_runtime_settings
 
 
 def _ai_available() -> bool:
-    return settings.use_local_llm or bool(settings.openai_api_key or settings.openai_base_url)
+    rt = get_runtime_settings()
+    return rt.use_local_llm or bool(rt.openai_api_key or rt.openai_base_url)
 
 
 def _ai_model() -> str:
-    if settings.use_local_llm:
-        return settings.ollama_model
-    return settings.openai_model
+    rt = get_runtime_settings()
+    if rt.use_local_llm:
+        return rt.ollama_model
+    return rt.openai_model
 
 
 def _ai_client() -> AsyncOpenAI:
-    if settings.use_local_llm:
+    rt = get_runtime_settings()
+    if rt.use_local_llm:
         return AsyncOpenAI(
             api_key="ollama",
-            base_url=settings.ollama_base_url,
+            base_url=rt.ollama_base_url,
         )
     return AsyncOpenAI(
-        api_key=settings.openai_api_key or "local-model",
-        base_url=settings.openai_base_url,
+        api_key=rt.openai_api_key or "local-model",
+        base_url=rt.openai_base_url,
     )
 
 
@@ -50,14 +53,25 @@ async def extract_image_key_info(
             messages=[
                 {
                     "role": "system",
-                    "content": "You inspect a user-uploaded image for fact-checking. Return a concise plain-text note with the most useful visible details, such as text, named entities, dates, locations, logos, screenshots, charts, or claims. Do not use markdown bullets.",
+                    "content": (
+                        "You inspect a user-uploaded image for fact-checking. "
+                        "Return a concise plain-text note of ONLY what is literally visible: "
+                        "on-image text, charts, logos, screenshots, dates, locations, or asserted claims shown in the image. "
+                        "Preserve brand/logo spellings EXACTLY as written, including typos or misspellings "
+                        "(e.g. write INQIURER if that is what appears, never autocorrect to Inquirer). "
+                        "Always quote any satire/parody/joke labels if they are literally printed on the image. "
+                        "Do not infer that a brand or outlet is satire/parody from the name alone. "
+                        "Do not guess identities, names, meme origins, viral history, or off-image context. "
+                        "If it is a reaction meme or joke caption with no factual assertion, say so briefly and quote the visible text. "
+                        "Do not use markdown bullets."
+                    ),
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": "Extract the most important visible details from this image for a fact-check report.",
+                            "text": "Describe only the literally visible details useful for deciding whether this image has a fact-checkable claim.",
                         },
                         {
                             "type": "image_url",
@@ -74,7 +88,7 @@ async def extract_image_key_info(
         return fallback
 
 
-async def summarize_context(context: ArtifactContext) -> tuple[str, list[str]]:
+async def summarize_context(context: ArtifactContext) -> tuple[str, list[str], bool]:
     if not _ai_available():
         return _heuristic_summary(context)
 
@@ -91,14 +105,102 @@ async def summarize_context(context: ArtifactContext) -> tuple[str, list[str]]:
     }
     response = await client.chat.completions.create(
         model=_ai_model(),
+        temperature=0,
+        response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": "You are a precise summarizer. Extract the post context and factual claims. Respond with ONLY a valid JSON object containing 'summary' (string) and 'key_claims' (array of strings). Do not include markdown fences or extra text."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise extraction stage for a fact-checking system. "
+                    "A downstream verifier will check your claims, so they must be faithful, specific, and standalone. "
+                    "You extract; you never judge whether a claim is true. "
+                    "Do not use judgment words such as 'falsely', 'misleading', or 'debunked'. "
+
+                    # --- Input ---
+                    "The user message is a JSON object describing one artifact (post text, image descriptions, image_key_info, etc.). "
+                    "Use only what the artifact itself shows or says. "
+
+                    # --- Writing claims ---
+                    "CLAIMS: List each distinct real-world claim the artifact puts forward, most central first, "
+                    "at most 8, merging duplicates. "
+                    "Each claim must be one self-contained sentence that a stranger could check without seeing the post. "
+                    "Keep every distinctive detail: vehicle/object type, location, quantity, dates, names, and modifiers "
+                    "(e.g. 'tricycle-style' / three-wheeled, not just 'ambulances'). "
+                    "Never broaden a specific claim into a generic one, and never add details that are not in the artifact. "
+                    "Write claims in English, but keep names and quotes in their original language. "
+                    "Resolve relative dates ('yesterday', 'this week') against the post date if given; "
+                    "otherwise keep them relative and say so in the claim. "
+                    "Ignore speculative identity guesses or viral-lore notes in image_key_info unless the artifact itself asserts them. "
+
+                    # --- What counts as a checkable claim ---
+                    "A claim is checkable if a fact-checker could, in principle, find a public record, news report, "
+                    "or provenance trail that confirms or refutes it. Apply these rules: "
+                    "(1) Personal anecdotes ('my neighbor's dog saved a kid'), predictions, hypotheticals, "
+                    "and hyperbole ('everyone is leaving this city') are NOT checkable. "
+                    "(2) Opinion with an embedded fact ('worst mayor ever, he cut the police budget by 40%'): "
+                    "extract only the factual part. "
+                    "(3) A rhetorical question that implies a claim ('why is the media hiding that X causes Y?'): "
+                    "extract the implied claim. "
+                    "(4) A captioned image or video ('footage from yesterday's protest in X'): "
+                    "the claim is the image's provenance (what/where/when), even if no sentence looks like a claim. "
+                    "(5) A screenshot of something a person said: the claim is that the person said it; "
+                    "extract the content of what they said as its own claim only if the artifact endorses it as fact. "
+
+                    # --- Satire / parody ---
+                    "SATIRE: Only label the artifact itself as satire/parody when (a) it has an explicit satire/joke label, "
+                    "or (b) it mimics a real news brand via misspelled branding. "
+                    "When that applies, use an allowlisted phrase such as 'parody outlet' or 'satirical presentation' in the summary "
+                    "and still extract the surface claims people might believe if they miss the label. "
+                    "Do not invent 'parody outlet' or similar from an unfamiliar brand name alone, or from an absurd premise alone. "
+                    "If the content merely discusses a film, show, or work that is a parody of something else, "
+                    "describe that without labeling the artifact as satire. "
+
+                    # --- verifiable ---
+                    "VERIFIABLE: Decide in this order. "
+                    "(1) If at least one checkable claim exists that the artifact presents as real "
+                    "(including satire presented as a real event, and claims it reports others as saying), set verifiable to true. "
+                    "(2) Otherwise, if the content is only vague/unfalsifiable, opinion, a reaction meme, joke, "
+                    "caption template (e.g. 'When you accidentally flip the camera'), humor, or entertainment with no assertion of fact, "
+                    "set verifiable to false. "
+                    "(3) If you are genuinely torn between true and false, choose true and extract the best candidate claim; "
+                    "a wasted check is cheaper than a missed one. "
+                    "If verifiable is false, key_claims must be an empty array. "
+
+                    # --- Summary ---
+                    "SUMMARY: 1-2 neutral sentences covering who posted what, in what format, and the overall framing. "
+
+                    # --- Examples ---
+                    "EXAMPLES: "
+                    "Post text 'BREAKING: 12 tricycle-style ambulances deployed in Cebu after quake' -> "
+                    "verifiable true, key_claims ['Twelve tricycle-style (three-wheeled) ambulances were deployed in Cebu after an earthquake.']. "
+                    "Image of a cat captioned 'me when the wifi drops' -> verifiable false, key_claims []. "
+                    "Banner 'The Onion Bulletin' with a small 'satire' tag over the headline 'Mayor bans Mondays citywide' -> "
+                    "summary mentions a satirical presentation, verifiable true, key_claims ['The mayor banned Mondays citywide.']. "
+                    "A post praising the film 'Scary Movie' as a parody of horror films -> "
+                    "summary describes a discussion of a parody film without calling the post satire; "
+                    "verifiable false unless it asserts a specific checkable fact. "
+
+                    # --- Output contract ---
+                    "Respond with ONLY a valid JSON object containing "
+                    "'summary' (string), 'key_claims' (array of strings), and 'verifiable' (boolean). "
+                    "Do not include markdown fences or extra text."
+                ),
+            },
             {"role": "user", "content": json.dumps(prompt)},
         ],
     )
     raw = response.choices[0].message.content or "{}"
     payload = _extract_json(raw)
-    return payload.get("summary", "No summary generated."), payload.get("key_claims", [])
+    summary = payload.get("summary", "No summary generated.")
+    claims = payload.get("key_claims", [])
+    if not isinstance(claims, list):
+        claims = []
+    claims = [str(c).strip() for c in claims if str(c).strip()]
+    if "verifiable" in payload:
+        verifiable = bool(payload["verifiable"]) and bool(claims)
+    else:
+        verifiable = bool(claims)
+    return summary, claims, verifiable
 
 
 def _extract_json(text: str) -> dict:
@@ -161,7 +263,7 @@ async def judge_report(summary: str, claims: list[str], evidence: list[EvidenceI
     return _plain_text_reason(raw)
 
 
-def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str]]:
+def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str], bool]:
     parts = [context.title, context.caption, context.description]
     if context.image_key_info:
         parts.append(f"Image notes: {context.image_key_info}")
@@ -176,7 +278,8 @@ def _heuristic_summary(context: ArtifactContext) -> tuple[str, list[str]]:
         cleaned = sentence.strip()
         if len(cleaned.split()) >= 5:
             claims.append(cleaned)
-    return summary, claims[:5]
+    claims = claims[:5]
+    return summary, claims, bool(claims)
 
 
 def _to_data_url(image_bytes: bytes, content_type: str | None) -> str:
