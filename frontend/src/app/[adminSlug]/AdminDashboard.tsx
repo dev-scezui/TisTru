@@ -176,8 +176,13 @@ export default function AdminDashboard() {
     tavily_api_key: "",
   });
 
+  // Wait until mount so /runtime-config.js (HF/Docker) is available.
+  const [firebaseReady, setFirebaseReady] = React.useState<boolean | null>(null);
+
   React.useEffect(() => {
-    if (!isFirebaseConfigured()) {
+    const configured = isFirebaseConfigured();
+    setFirebaseReady(configured);
+    if (!configured) {
       setAuthReady(true);
       return;
     }
@@ -282,7 +287,7 @@ export default function AdminDashboard() {
     }
   }
 
-  if (!authReady) {
+  if (firebaseReady === null || !authReady) {
     return (
       <div className="admin-root">
         <div className="admin-boot">
@@ -293,7 +298,7 @@ export default function AdminDashboard() {
     );
   }
 
-  if (!isFirebaseConfigured()) {
+  if (!firebaseReady) {
     return (
       <div className="admin-root">
         <div className="admin-login-wrap">
@@ -303,9 +308,10 @@ export default function AdminDashboard() {
             </div>
             <h1>Firebase not configured</h1>
             <p className="admin-lede">
-              Add <code>NEXT_PUBLIC_FIREBASE_*</code> and{" "}
-              <code>NEXT_PUBLIC_ADMIN_PATH_SECRET</code> to the frontend env, then
-              restart the dev server.
+              Set <code>NEXT_PUBLIC_FIREBASE_*</code> (and{" "}
+              <code>NEXT_PUBLIC_ADMIN_PATH_SECRET</code> or{" "}
+              <code>ADMIN_PATH_SECRET</code>) on the Space, then rebuild/restart
+              so runtime-config can load.
             </p>
           </section>
         </div>

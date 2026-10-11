@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Dockerfile for TisTru (Hugging Face Spaces / self-hosted Docker)
 # Bundles FastAPI backend + Next.js frontend + local Ollama LLM server.
 #
@@ -9,6 +10,11 @@
 #
 # For GPU support on HF Spaces, use a GPU-enabled Space template.
 # HF Spaces requires the app to listen on port 7860 and run as UID 1000.
+#
+# NEXT_PUBLIC_* is inlined into the Next.js client at build time:
+#   - Space Variables  → Docker build-args (ARG below)
+#   - Space Secrets    → BuildKit secret mounts (RUN --mount below)
+# Prefer Variables for Firebase web config (it is public by design).
 
 # ─────────────────────────────────────────────
 # Stage 1: Build the Next.js frontend
@@ -24,8 +30,7 @@ RUN npm ci
 # Copy source and build
 COPY frontend ./
 
-# NEXT_PUBLIC_* is inlined at build time. HF Spaces passes matching Space
-# secrets/variables as build-args; declare ARG+ENV so Next can see them.
+# HF Variables arrive as build-args; Secrets do not — see secret mounts on RUN.
 ARG NEXT_PUBLIC_FIREBASE_API_KEY
 ARG NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
 ARG NEXT_PUBLIC_FIREBASE_PROJECT_ID
@@ -39,8 +44,30 @@ ENV NEXT_PUBLIC_API_URL= \
     NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID \
     NEXT_PUBLIC_ADMIN_PATH_SECRET=$NEXT_PUBLIC_ADMIN_PATH_SECRET
 
-# Produces .next/standalone + .next/static (requires output:'standalone' in next.config.js)
-RUN npm run build
+# Optional: bake NEXT_PUBLIC_* when ARG/secret mounts are present.
+# HF/Docker also injects them at runtime via start.sh → public/runtime-config.js.
+RUN --mount=type=secret,id=NEXT_PUBLIC_FIREBASE_API_KEY \
+    --mount=type=secret,id=NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN \
+    --mount=type=secret,id=NEXT_PUBLIC_FIREBASE_PROJECT_ID \
+    --mount=type=secret,id=NEXT_PUBLIC_FIREBASE_APP_ID \
+    --mount=type=secret,id=NEXT_PUBLIC_ADMIN_PATH_SECRET \
+    set -eu; \
+    for name in \
+      NEXT_PUBLIC_FIREBASE_API_KEY \
+      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN \
+      NEXT_PUBLIC_FIREBASE_PROJECT_ID \
+      NEXT_PUBLIC_FIREBASE_APP_ID \
+      NEXT_PUBLIC_ADMIN_PATH_SECRET; do \
+      if [ -f "/run/secrets/$name" ]; then \
+        export "$name=$(cat "/run/secrets/$name")"; \
+      fi; \
+    done; \
+    if [ -n "${NEXT_PUBLIC_FIREBASE_API_KEY:-}" ]; then \
+      echo "Frontend build: Firebase web config present."; \
+    else \
+      echo "Frontend build: Firebase web config empty (runtime-config.js will supply it)."; \
+    fi; \
+    npm run build
 
 RUN test -d .next/standalone || \
     (echo "ERROR: .next/standalone not found. Add output:'standalone' to next.config.js" && exit 1)

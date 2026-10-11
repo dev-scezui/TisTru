@@ -132,7 +132,8 @@ export default function HomePage() {
   const [error, setError] = React.useState("");
   const [isDragging, setIsDragging] = React.useState(false);
   const [user, setUser] = React.useState<User | null>(null);
-  const [authReady, setAuthReady] = React.useState(!isFirebaseConfigured());
+  const [authReady, setAuthReady] = React.useState(false);
+  const [firebaseReady, setFirebaseReady] = React.useState(false);
   const [authBusy, setAuthBusy] = React.useState(false);
   const [needsSignIn, setNeedsSignIn] = React.useState(false);
   const router = useRouter();
@@ -141,10 +142,12 @@ export default function HomePage() {
 
   const mode = detectMode(composeText, imageFile);
   const canSubmit = mode !== null && !isLoading;
-  const firebaseReady = isFirebaseConfigured();
 
   React.useEffect(() => {
-    if (!firebaseReady) {
+    // After mount so /runtime-config.js from Docker/HF start.sh is visible.
+    const configured = isFirebaseConfigured();
+    setFirebaseReady(configured);
+    if (!configured) {
       setAuthReady(true);
       return;
     }
@@ -158,7 +161,7 @@ export default function HomePage() {
     } catch {
       setAuthReady(true);
     }
-  }, [firebaseReady]);
+  }, []);
 
   React.useEffect(() => {
     if (!isLoading) {

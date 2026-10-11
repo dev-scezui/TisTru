@@ -8,20 +8,20 @@ import {
 } from "firebase/auth";
 
 import { API_URL } from "./api";
+import { publicEnv } from "./publicEnv";
 
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-};
+function firebaseConfig() {
+  return {
+    apiKey: publicEnv("NEXT_PUBLIC_FIREBASE_API_KEY"),
+    authDomain: publicEnv("NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN"),
+    projectId: publicEnv("NEXT_PUBLIC_FIREBASE_PROJECT_ID"),
+    appId: publicEnv("NEXT_PUBLIC_FIREBASE_APP_ID"),
+  };
+}
 
 export function isFirebaseConfigured(): boolean {
-  return Boolean(
-    firebaseConfig.apiKey &&
-      firebaseConfig.authDomain &&
-      firebaseConfig.projectId,
-  );
+  const cfg = firebaseConfig();
+  return Boolean(cfg.apiKey && cfg.authDomain && cfg.projectId);
 }
 
 let app: FirebaseApp | undefined;
@@ -33,7 +33,7 @@ export function getFirebaseAuth(): Auth {
     throw new Error("Firebase web config is missing");
   }
   if (!app) {
-    app = getApps()[0] ?? initializeApp(firebaseConfig);
+    app = getApps()[0] ?? initializeApp(firebaseConfig());
   }
   if (!auth) {
     auth = getAuth(app);

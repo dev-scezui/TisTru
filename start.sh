@@ -52,6 +52,40 @@ fi
 # FastAPI (or a reverse proxy in start.sh) forwards /  requests to it.
 NEXT_PORT=3000
 echo "[3/4] Starting Next.js frontend on internal port $NEXT_PORT..."
+
+# NEXT_PUBLIC_* is baked at `next build`; HF Variables/Secrets are reliable at
+# runtime. Write a small JS file the browser loads before React hydrates.
+# Also alias ADMIN_PATH_SECRET for the Next server (admin route check).
+export ADMIN_PATH_SECRET="${ADMIN_PATH_SECRET:-${NEXT_PUBLIC_ADMIN_PATH_SECRET:-}}"
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+keys = (
+    "NEXT_PUBLIC_FIREBASE_API_KEY",
+    "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
+    "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
+    "NEXT_PUBLIC_FIREBASE_APP_ID",
+    "NEXT_PUBLIC_ADMIN_PATH_SECRET",
+)
+cfg = {k: os.environ.get(k, "") for k in keys}
+# Allow ADMIN_PATH_SECRET secret name to populate the public admin path.
+if not cfg["NEXT_PUBLIC_ADMIN_PATH_SECRET"]:
+    cfg["NEXT_PUBLIC_ADMIN_PATH_SECRET"] = os.environ.get("ADMIN_PATH_SECRET", "")
+
+out = Path("/app/frontend/public/runtime-config.js")
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(
+    "window.__TISTRU_ENV__=" + json.dumps(cfg) + ";\n",
+    encoding="utf-8",
+)
+missing = [k for k in keys[:3] if not cfg.get(k)]
+if missing:
+    print("[3/4] WARN: runtime Firebase config missing:", ", ".join(missing))
+else:
+    print("[3/4] Wrote runtime-config.js for Firebase web config.")
+PY
+
 cd /app/frontend
 HOSTNAME=0.0.0.0 PORT=$NEXT_PORT node server.js &
 NEXT_PID=$!

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Script from 'next/script'
 import PageviewBeacon from '../components/PageviewBeacon'
 import './globals.css'
 import './constants.css'
@@ -19,6 +20,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body suppressHydrationWarning={true}>
+        {/* HF/Docker: start.sh writes this from runtime Space env (build-time NEXT_PUBLIC_* is often empty). */}
+        <Script src="/runtime-config.js" strategy="beforeInteractive" />
         <PageviewBeacon />
         {children}
       </body>
