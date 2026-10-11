@@ -1,9 +1,14 @@
 import type { Metadata } from 'next'
+import PageviewBeacon from '../components/PageviewBeacon'
 import './globals.css'
+import './constants.css'
 
 export const metadata: Metadata = {
   title: 'TisTru',
   description: 'AI-assisted public claim investigation',
+  icons:{
+    icon: '/tistru2.png',
+  } 
 }
 
 export default function RootLayout({
@@ -13,7 +18,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body suppressHydrationWarning={true}>{children}</body>
+      <body suppressHydrationWarning={true}>
+        <PageviewBeacon />
+        {children}
+      </body>
     </html>
   )
 }

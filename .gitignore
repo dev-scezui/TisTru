@@ -11,3 +11,5 @@ dist/
 docs/
 
 .env.local
+.audit/
+backend/tests/

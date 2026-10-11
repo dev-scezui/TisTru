@@ -5,13 +5,11 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import ArtifactContext
+from app.services.url_safety import MAX_REDIRECTS, UnsafeUrlError, validate_http_destination
 
 
 async def extract_artifact_context(url: str) -> ArtifactContext:
-    async with httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=True) as client:
-        response = await client.get(url, headers={"User-Agent": "TisTruBot/0.1"})
-        response.raise_for_status()
-
+    response = await _safe_get(url)
     soup = BeautifulSoup(response.text, "html.parser")
 
     title = _first_content(soup, [("meta", {"property": "og:title"}), ("meta", {"name": "twitter:title"})])
@@ -48,6 +46,39 @@ async def extract_artifact_context(url: str) -> ArtifactContext:
         images=images,
         videos=videos,
     )
+
+
+async def _safe_get(url: str) -> httpx.Response:
+    """Fetch url while pinning each hop to a resolved public IP (DNS rebinding harden)."""
+    current = url
+    async with httpx.AsyncClient(
+        timeout=settings.request_timeout_seconds,
+        follow_redirects=False,
+    ) as client:
+        for _ in range(MAX_REDIRECTS + 1):
+            dest = validate_http_destination(current)
+            headers = {
+                "User-Agent": "TisTruBot/0.1",
+                "Host": dest.host_header(),
+            }
+            extensions = None
+            if dest.scheme == "https":
+                extensions = {"sni_hostname": dest.hostname}
+            response = await client.get(
+                dest.connect_url(),
+                headers=headers,
+                extensions=extensions,
+            )
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    raise UnsafeUrlError("Redirect missing Location header")
+                # Resolve relative redirects against the original logical URL, not the IP URL.
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            return response
+    raise UnsafeUrlError("Too many redirects")
 
 
 def _first_content(soup: BeautifulSoup, selectors: list[tuple[str, dict[str, str]]]) -> str | None:

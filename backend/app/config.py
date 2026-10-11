@@ -14,6 +14,17 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     firebase_credentials_path: str | None = None
     firebase_service_account_json: str | None = None
+    admin_path_secret: str | None = None
+    admin_emails: str = ""
+    trust_x_forwarded_for: bool = False
+    fact_check_rate_limit: int = 5
+    fact_check_rate_window_seconds: int = 60
+    fact_check_anon_limit: int = 1
+    fact_check_user_daily_limit: int = 5
+    max_text_chars: int = 8000
+    min_text_chars: int = 20
+    max_url_length: int = 2048
+    max_image_bytes: int = 5 * 1024 * 1024
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

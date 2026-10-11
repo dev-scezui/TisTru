@@ -13,6 +13,7 @@ class Verdict(str, Enum):
 
 class FactCheckRequest(BaseModel):
     url: HttpUrl | None = None
+    text: str | None = None
 
 
 class ArtifactContext(BaseModel):
